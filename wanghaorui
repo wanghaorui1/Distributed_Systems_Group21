@@ -1,0 +1,215 @@
+/*
+ * @Author: amamiya-yuuko-1225 1913250675@qq.com
+ * @Date: 2024-11-09 14:27:05
+ * @LastEditors: amamiya-yuuko-1225 1913250675@qq.com
+ * @Description:
+ */
+package main
+
+import (
+	"bufio"
+	"flag"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+)
+
+const (
+	//maxmimum number of connections
+	MAX_CONN = 10
+	//root directory for files
+	FILE_DIR = "/home/amamiya"
+)
+
+var (
+	//map file extenstions to content-type
+	extMap = map[string]string{
+		".html": "text/html",
+		".txt":  "text/plain",
+		".gif":  "image/gif",
+		".jpeg": "image/jpeg",
+		".jpg":  "image/jpeg",
+		".css":  "text/css",
+	}
+	// control the degree of accepted connections
+	connChan = make(chan int, MAX_CONN)
+)
+
+/**
+ * @description: process GET request
+ * @param {*http.Request} req
+ * @return {*http.Response}:
+ * nil: unexpected error; 400 Bad Request for unsupported file extensions
+ * 404 Not Found for missing file; 200 OK
+ */
+func process_get_req(req *http.Request) *http.Response {
+	//Get request path and file extension
+	path := req.URL.Path
+	resp, err := http.Get(path)
+	if err != nil {
+		log.Println("Failed to fetch from the remote serverq:", err)
+		return &http.Response{
+			Status:     "500 Internal Server Error",
+			StatusCode: http.StatusInternalServerError,
+			Proto:      "HTTP/1.0",
+			ProtoMajor: 1,
+			ProtoMinor: 0,
+			Header:     make(http.Header),
+			Body:       nil,
+		}
+	}
+	defer resp.Body.Close()
+
+	response := &http.Response{
+		Status:     resp.Status,
+		StatusCode: resp.StatusCode,
+		Proto:      "HTTP/1.0",
+		ProtoMajor: 1,
+		ProtoMinor: 0,
+		Header:     make(http.Header),
+		Body:       resp.Body,
+	}
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			response.Header.Add(key, value)
+		}
+	}
+
+	return response
+
+}
+
+/**
+ * @description: process POST request
+ * @param {*http.Request} req
+ * @return {*http.Response} nil: unexpected error; 200 OK
+ */
+func process_post_req(req *http.Request) *http.Response {
+	//Open requst body
+	reqBody := req.Body
+	defer reqBody.Close()
+
+	//Get request path, create an empty file for the target
+	path := req.URL.Path
+	outFile, err := os.Create(FILE_DIR + path)
+	if err != nil {
+		log.Println(err)
+		return nil
+	}
+	defer outFile.Close()
+
+	//Write request body to target file
+	if _, err := io.Copy(outFile, reqBody); err != nil {
+		log.Println(err)
+		return nil
+	}
+
+	// Request successfully handled
+	return &http.Response{
+		Status:     "200 OK",
+		StatusCode: http.StatusOK,
+		Proto:      "HTTP/1.0",
+		ProtoMajor: 1,
+		ProtoMinor: 0,
+		Header:     make(http.Header),
+		Body:       nil,
+	}
+}
+
+/**
+ * @description: deal with http request for a tcp connection
+ * @param {net.Conn} conn: tcp connection
+ * @return {*}
+ */
+func process_conn(conn net.Conn) {
+
+	connChan <- 1
+	defer func() { <-connChan }()
+
+	defer conn.Close()
+
+	buf := make([]byte, 1024)
+	_, err := conn.Read(buf)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	reader := bufio.NewReader(strings.NewReader(string(buf)))
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		log.Println("Failed to parse request:", err)
+		return
+	}
+
+	var response *http.Response
+
+	switch req.Method {
+	case "GET":
+
+		response = process_get_req(req)
+	case "POST":
+
+		response = process_post_req(req)
+	default:
+
+		response = &http.Response{
+			Status:     "501 Not Implemented",
+			StatusCode: http.StatusNotImplemented,
+			Proto:      "HTTP/1.0",
+			ProtoMajor: 1,
+			ProtoMinor: 0,
+			Header:     make(http.Header),
+			Body:       nil,
+		}
+	}
+
+	if response == nil {
+		log.Println("Internal error while processing request")
+		response = &http.Response{
+			Status:     "500 Internal Server Error",
+			StatusCode: http.StatusInternalServerError,
+			Proto:      "HTTP/1.0",
+			ProtoMajor: 1,
+			ProtoMinor: 0,
+			Header:     make(http.Header),
+			Body:       nil,
+		}
+	}
+
+	err = response.Write(conn)
+	if err != nil {
+		log.Println("Failed to write response:", err)
+	}
+}
+
+func main() {
+
+	port := flag.String("p", "20000", "Specifiy listing port")
+	flag.Parse()
+
+	listen, err := net.Listen("tcp", ":"+*port)
+	if err != nil {
+		log.Fatal("Failed to listen:", err)
+		return
+	}
+	defer listen.Close()
+
+	log.Printf("Proxy server is listening on port %s\n", *port)
+
+	// process request
+	for {
+		conn, err := listen.Accept()
+		if err != nil {
+			log.Println("Failed to accept connection:", err)
+			continue
+		}
+
+		//set connection
+		go process_conn(conn)
+	}
+}
